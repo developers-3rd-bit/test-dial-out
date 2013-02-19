@@ -1,0 +1,19 @@
+package com.halcyon.core.user
+{
+	import com.halcyon.message.core.RoleChangeBrd;
+	
+	import flash.events.Event;
+	
+	public class RoleChangeEvent extends Event
+	{
+		public static const EVENT_ID:String = "RoleChangeEvent";
+		
+		public var brd:RoleChangeBrd;
+		
+		public function RoleChangeEvent(brd:RoleChangeBrd)
+		{
+			super(EVENT_ID);
+			this.brd = brd;
+		}
+	}
+}

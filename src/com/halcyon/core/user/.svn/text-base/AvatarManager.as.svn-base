@@ -1,0 +1,784 @@
+package com.halcyon.core.user
+{
+	import com.halcyon.core.application.AppManager;
+	import com.halcyon.core.audioConferencing.AudioConferenceManager;
+	import com.halcyon.core.communications.LoginProcess;
+	import com.halcyon.core.communications.session.Session;
+	import com.halcyon.core.realm.RealmManager;
+	import com.halcyon.core.show.ShowEvents;
+	import com.halcyon.core.webcam.session.WebcamSessionManager;
+	import com.halcyon.message.core.AvatarActionBrd;
+	import com.halcyon.message.core.AvatarEnteredBrd;
+	import com.halcyon.message.core.AvatarExitedBrd;
+	import com.halcyon.message.core.AvatarStateBrd;
+	import com.halcyon.message.core.AvatarStateReq;
+	import com.halcyon.message.core.EnterRealmRes;
+	import com.halcyon.message.core.ImageUploadedBrd;
+	import com.halcyon.message.core.RoleChangeBrd;
+	import com.halcyon.message.core.RoleChangeReq;
+	import com.halcyon.message.core.UpdateUserBrd;
+	import com.halcyon.message.pgi.ActiveTalkerBrd;
+	import com.halcyon.message.pgi.BreakoutConferenceBrd;
+	import com.halcyon.message.ref.AvatarRef;
+	import com.halcyon.message.ref.UserRef;
+	import com.halcyon.util.events.ActiveTalkerEvent;
+	import com.halcyon.util.events.AvatarStateEvent;
+	import com.halcyon.util.events.EventManager;
+	import com.halcyon.util.events.HalcyonEvent;
+	import com.halcyon.util.events.NotificationEvent;
+	import com.halcyon.util.events.UpdateUserEvent;
+	import com.halcyon.util.localization.Babelfish;
+	import com.halcyon.util.utilities.ContextManager;
+	import com.halcyon.util.utilities.GlobalConstants;
+	import com.halcyon.util.utilities.HashMap;
+	import com.halcyon.util.utilities.LogFactory;
+	import com.halcyon.util.utilities.Logger;
+	import com.halcyon.util.utilities.PhoneUtil;
+	
+	import flash.events.Event;
+	import flash.events.EventDispatcher;
+	
+	
+	public class AvatarManager extends EventDispatcher
+	{
+		public static const CREATE_TEMP_USER:String = "CREATE_TEMP_USER";
+		public static const REMOVE_TEMP_USER:String = "REMOVE_TEMP_USER";
+		public static const UPDATE_USER:String = "UPDATE_USER";
+		public static const UPDATE_USER_IMAGE:String = "UPDATE_USER_IMAGE";
+		public static const PARTICIPANT_ENTERED:String = "PARTICIPANT_ENTERED";
+		public static const PARTICIPANT_EXITED:String = "PARTICIPANT_EXITED";
+		public static const SPECTATOR_ENTERED:String = "SPECTATOR_ENTERED";
+		public static const SPECTATOR_EXITED:String = "SPECTATOR_EXITED";
+		public static const MY_USER_SET:String = "myUserSet";
+		public static const HOST_USER_SET:String = "hostUserSet";
+		public static const ROLE_CHANGE:String = "ROLE_CHANGE_EVENT";
+		
+		private static var log:Logger = LogFactory.getLog("AvatarManager", Logger.DEBUG);
+		private static var inst:AvatarManager;
+		private var _eventManager:EventManager;
+		private var players:HashMap;
+		private var spectators:HashMap;
+		private var missingUserUpdates:HashMap;
+		private var maxNumUsers:Number = 0;
+		private var myUserId:Number;
+		private var myUser:User;
+		private var myPassword:String;
+		private var hostUser:User;
+		private var hasActionNotified:Boolean;
+		
+		public static function getInstance():AvatarManager{
+			if(inst == null){
+				inst = new AvatarManager();
+			}
+			return inst;
+		}
+		
+		public function AvatarManager(){
+			log.debug("CREATED NEW MANAGER");
+			players = new HashMap();
+			spectators = new HashMap();
+			missingUserUpdates = new HashMap();
+			_eventManager = EventManager.getInstance();
+		}
+		
+		public function getIsHost(user:User):Boolean{
+			return (user.getId() == hostUser.getId());
+		}
+		
+		public function setMyUserId(myUserId:Number):void{
+			this.myUserId = myUserId;
+		}
+		
+		public function getMyUser():User{
+			return this.myUser;
+		}
+		
+		/**
+		 * Convenience method to see if I am currently a valid presenter
+		 *@return true if the user is a presenter (has the valid role set and is not a spectator)
+		 */
+		public function getAmIPresenter():Boolean{
+			log.debug("MY realm user: " + getMyRealmUser());
+			if(getMyRealmUser() == null) return false;
+			log.debug("Am I presenter : " + getMyRealmUser().getIsPresenter());
+			return getMyRealmUser().getIsPresenter();
+		}
+		
+		public function getMyRealmUser():RealmUser{
+			if(this.myUser != null){
+				return this.getPlayerById(this.myUser.getId());
+			} else return null;
+		}
+		
+		public function setMyUser(myUser:User):void{
+			log.debug("Got my user: " + myUser);
+			this.myUser = myUser;
+			var evt:HalcyonEvent = new HalcyonEvent(AvatarManager.MY_USER_SET);
+			dispatchEvent(evt);
+			
+			/*Babelfish.getInstance().loadLang(this.myUser.getLang());
+			if (!this.myUser.getIsGuest()) this.myUser.getContacts().refreshContacts();
+			Babelfish.getInstance().loadLang(this.myUser.getLang());*/
+			
+		}
+		
+		public function setHostUser(hostUser:User):void{
+			this.hostUser = hostUser;
+			var evt:HalcyonEvent = new HalcyonEvent(AvatarManager.HOST_USER_SET);
+			dispatchEvent(evt);
+		}
+		
+		public function getHostUser():User{
+			return this.hostUser;
+		}
+		
+		public function getMyPassword():String{
+			log.debug("$$$$$Asking for password, returning: " + this.myPassword);
+			return this.myPassword;
+		}
+		
+		public function setMyPassword(myPassword:String):void{
+			this.myPassword = myPassword;
+		}
+		
+		public function addPlayer(participant:RealmUser):void {
+			if (!players.containsKey(participant.getUser().getId())) {
+				players.put(participant.getUser().getId(),participant);
+				if(players.size() > this.maxNumUsers) this.maxNumUsers = players.size();
+				var brd:UpdateUserBrd = this.missingUserUpdates.remove(participant.getUser().getId()) as UpdateUserBrd;
+				log.debug("Got a brd of: " + brd + " from the missing updates list for player: " + participant.getUser().getName());
+				if(brd != null){
+					var id:Number = participant.getUser().getId();
+					if (this.myUserId != id) {
+						log.debug("addPlayer: updating myUser");
+						participant.getUser().update(brd.getUserRef());
+						//this.myUser.update(brd.getUserRef());
+					}
+					//TODO: This should be keyed off the event above
+					//Main.getInstance().getViewManager().updateUser(participant.getUser());
+					brd.getUserRef().setWeatherXml(null);
+				}
+				var newEvent:HalcyonEvent;
+				if(participant.getIsSpectator()){
+					log.debug("Entered user is a spectator, dispatching SPECTATOR_ENTERED");
+					newEvent = new HalcyonEvent(SPECTATOR_ENTERED);
+				} else {
+					log.debug("Entered user is a participant, dispatching PARTICIPANT_ENTERED");
+					newEvent = new HalcyonEvent(PARTICIPANT_ENTERED);
+				}
+				var extra:Object = new Object();
+				extra.participant = participant;
+				newEvent.setExtra(extra);
+				
+				this.dispatchEvent(newEvent);
+			}
+		}
+		
+		public function addSpectator():void{
+			
+		}
+		
+		public function createTempCube(phoneNum:String, phoneIntlPrefix:String, phoneExt:String, firstName:String, lastName:String, connectionCubeStatus:String=""):void{
+			log.debug("Creating temp user phone: " + phoneNum + " firstName: " + firstName + " lastname: " + lastName);
+			var userRef:UserRef = new UserRef();
+			userRef.setFirstName(firstName);
+			userRef.setLastName(lastName);
+			userRef.setPhone(phoneNum);
+			userRef.setPhoneExt(phoneExt);
+			userRef.setPhoneIntlPrefix(phoneIntlPrefix);
+			userRef.setShowPhone(true);
+			userRef.setImageType(0);
+			userRef.setLoading(true);
+			if (connectionCubeStatus != "")
+			{
+				var prefs:Object = userRef.getPrefs();
+				if (!prefs) {
+					prefs = new Object();
+				}
+				prefs["skip.connectionCubeStatus"] = connectionCubeStatus;
+				userRef.setPrefs(prefs);
+			}
+
+			userRef.setId(GlobalConstants.TEMP_CUBE_ID);
+			var realmUserRef:AvatarRef = new AvatarRef();
+			realmUserRef.setUserRef(userRef);
+			var realmUser:RealmUser = new RealmUser(realmUserRef);
+			//Main.getInstance().getViewManager().addTempUser(realmUser.getUser());
+			var event:HalcyonEvent = new HalcyonEvent(CREATE_TEMP_USER,false,false,realmUser.getUser());
+			dispatchEvent(event);
+		}
+		
+		public function removeTempCube(phoneNum:String):void{
+			var userRef:UserRef = new UserRef();
+			userRef.setPhone(phoneNum);
+			userRef.setShowPhone(true);
+			userRef.setImageType(0);
+			userRef.setLoading(true);
+			userRef.setId(GlobalConstants.TEMP_CUBE_ID);
+			var realmUserRef:AvatarRef = new AvatarRef();
+			realmUserRef.setUserRef(userRef);
+			var realmUser:RealmUser = new RealmUser(realmUserRef);
+			//Main.getInstance().getViewManager().removeTempUser(realmUser.getUser());
+			var event:HalcyonEvent = new HalcyonEvent(REMOVE_TEMP_USER,false,false,realmUser.getUser());
+			dispatchEvent(event);
+		}
+		
+		public function clearList(preserveMe:Boolean):void{
+			var values:Array = players.getValues();
+			for(var i:int = 0; i < values.length; i++){
+				var user:RealmUser = values[i] as RealmUser;
+				if(user.getUser().getId() != this.myUserId){
+					players.remove(user.getUser().getId());
+				} else if(preserveMe == false){
+					players.remove(user.getUser().getId());
+				}
+			}
+		}
+		
+		public function getPlayerById(id:Number):RealmUser{
+			return players.get(id) as RealmUser;
+		}
+		
+		public function getPlayerByName(name:String):Avatar{
+			var users:Array = players.values();
+			for(var i:int = 0; i < users.length; i++){
+				var tempUser:Avatar = users[i] as Avatar;
+				if(tempUser.getUser().getScreenName() == name){
+					return tempUser;
+				}
+			}
+			return null;
+		}
+		
+		public function getUserWithPhone(phone:String):User{
+			var users:Array = players.values();
+			for(var i:int = 0; i < users.length; i++){
+				var tempUser:User = (users[i] as RealmUser).getUser();
+				if(PhoneUtil.matches(phone,tempUser.getPhone()) || PhoneUtil.matches(phone,tempUser.getPhone2())){
+					return tempUser;
+				}
+			}
+			return null;
+		}
+		
+		public function getUserById(userId:Number):User
+		{
+			return User.getUserById(userId);
+		}
+		
+		public function isDVRinRoom():Boolean
+		{
+			for each (var participant:RealmUser in this.players.values())
+			{
+				if (participant.getUser().getIsDVR()) return true;
+			}
+			return false;
+		}
+		
+		public function isSelfRecording():Boolean
+		{
+			var users:Array = players.values();
+			
+			if (users.length > 2)
+			{
+				// too many users, can't be self-recording
+				return false;
+			}
+			
+			var foundDVRUser:Boolean = false;
+			var foundHost:Boolean = false;
+			
+			for each (var participant:RealmUser in this.players.values())
+			{
+				if (participant.getUser().getIsDVR())
+				{
+					foundDVRUser = true;
+				}
+				if (participant.getUser().isHost())
+				{
+					foundHost = true;
+				}
+			}
+			
+			if (users.length == 1)
+			{
+				return foundHost;
+			}
+			if (users.length == 2)
+			{
+				return (foundDVRUser && foundHost);
+			}
+			
+			return false;
+		}
+		
+		/**
+		 * Get an array of all players, excluding those that are not
+		 * visible (currently, just DVR users)
+		 * @return Array of "visible" players in the room
+		 */
+		public function getVisiblePlayers():Array
+		{
+			var vPlayers:Array = [];
+			for each (var participant:RealmUser in this.players.values())
+			{
+				if (!participant.getUser().getIsDVR()) vPlayers.push(participant);
+			}
+			return vPlayers;
+		}
+		
+		public function getAllPlayers():Array{
+			//return Main.getInstance().getPlayerList().getAvatars();
+			return this.players.values();
+		}
+		
+		public function getNumWebPlayers():int
+		{
+			var count:int = 0;
+			for each (var participant:RealmUser in this.players.values())
+			{
+				if (!participant.getUser().getDialinOnly()) count++;
+			}
+			return count;
+		}
+		
+		/**This returns all of teh user objects.  Not that user objects are not the same as
+		*Avatars which are what most RealmUsers are.
+		 * @return An array containing the user object of all people in the room
+		 */
+		public function getAllUsers():Array{
+			var toRet:Array = new Array();
+			for(var i:int = 0; i < this.players.values().length; i++){
+				toRet.push(this.players.values()[i].getUser());
+			}
+			return toRet;
+		}
+		
+		public function getAllSpectators():Array{
+			var toRet:Array = new Array();
+			for(var i:int = 0; i< this.players.values().length; i++){
+				if((this.players.values()[i] as RealmUser).getIsSpectator()){
+					toRet.push(this.players.values()[i]);
+				}
+			}
+			return toRet;
+		}
+		
+		/**
+		 * Function to get all participants in the room
+		 * @return An array containing all RealmUsers that are not spectators
+		 */
+		public function getAllAvatars():Array{
+			var toRet:Array = new Array();
+			for(var i:int = 0; i< this.players.values().length; i++){
+				if((this.players.values()[i] as RealmUser).getIsSpectator() == false ){
+					toRet.push(this.players.values()[i]);
+				}
+			}
+			return toRet;
+		}
+		
+		public function initFromRes(response:EnterRealmRes):void{
+			var newAvatars:Array = response.getSceneRef().getAvatarRefs();
+			//RealmManager.getInstance().getCurrentRealm().setInitialAvatarNum(newAvatars.length);
+			for(var i:int = 0; i < newAvatars.length; i++){
+				var newParticipant:Avatar = new Avatar(newAvatars[i] as AvatarRef);
+				addAvatarApps(newParticipant);
+				log.debug("Adding participant!" + newParticipant);
+				addPlayer(newParticipant);
+				if(this.myUser != null && newParticipant.getUser().getId() == this.myUserId){
+					//It's possible the enterRealmRes is coming AFTER the UpdateUserBrd that sets the weather/temp
+					//so make sure it doesn't overwrite weather and temp
+					if (this.myUser==null || (this.myUser.getTemp() == User.DISABLED_TEMP && newParticipant.getUser().getTemp() != User.DISABLED_TEMP))
+					{
+						this.myUser = newParticipant.getUser();
+					}
+				}
+			}
+			this.myUser.update(response.getMyUser());
+			setupListeners();
+		}
+		
+		private function setupListeners():void{
+			log.debug("SetupListeners");
+			_eventManager.addEventListenerAndReplay(UpdateUserBrd.EVENT_ID, onUpdateUser,false,10);
+			_eventManager.addEventListener(AvatarStateBrd.EVENT_ID, onAvatarState,false, 0);
+			_eventManager.addEventListener(AvatarStateEvent.SET_STATE, onSetAvatarState);
+			_eventManager.addEventListenerAndReplay(AvatarEnteredBrd.EVENT_ID, onAvatarEntered);
+			_eventManager.addEventListener(AvatarExitedBrd.EVENT_ID, onAvatarExited);
+			_eventManager.addEventListener(AvatarActionBrd.EVENT_ID, onAvatarAction);
+			_eventManager.addEventListener(ImageUploadedBrd.EVENT_ID, onImageUploaded);
+			_eventManager.addEventListenerAndReplay(RoleChangeBrd.EVENT_ID, onRoleChange);
+			_eventManager.addEventListener(BreakoutConferenceBrd.EVENT_ID, onBreakout);
+			_eventManager.addEventListener(ActiveTalkerBrd.EVENT_ID, onActiveTalkerBrd);
+//			EventManager.getInstance().addEventListenerAndReplay(SpectatorEnteredBrd.EVENT_ID, onSpectatorEntered);
+		}
+		
+		/**
+		 * Sets the role of the given user to be a presenter and removes that role from anyone else who has it
+		 * @param id The User ID of the user you want to make a presenter
+		 */
+		public function makeUserPresenter(id:Number):void{
+			var user:RealmUser = this.getPlayerById(id);
+			var req:RoleChangeReq = new RoleChangeReq();
+			req.setUserId(id);
+			req.setRoles(user.getRoles() | Role.ROLE_PRESENTER);
+			Session.getInstance().sendMessage(req);
+			var req2:RoleChangeReq;
+			var users:Array = this.players.getValues();
+			for(var i:int = 0; i < users.length; i++){
+				if((users[i] as RealmUser).getIsSpectator() == false && (users[i] as RealmUser).getUser().getId() != id){
+					req2 = new RoleChangeReq();
+					req2.setUserId(users[i].getUser().getId());
+					req2.setRoles((users[i] as RealmUser).getRoles() & ~Role.ROLE_PRESENTER);
+					Session.getInstance().sendMessage(req2);
+				}
+			}
+		}
+		
+		private function addAvatarApps(user:RealmUser):void {
+			var apps:Array = user.getApps();
+			if(apps == null) return;
+			for(var i:int= 0; i < apps.length; i++){
+				AppManager.getInstance().addApp(apps[i],user.getUser().getId());
+			}
+		}
+		
+		public function isConferenceActive():Boolean{
+			var toRet:Boolean = false;
+			var avatars:Array = this.players.values();
+			for(var i:int = 0; i < avatars.length; i++){
+				var user:User = (avatars[i] as RealmUser).getUser();
+				if(user.getIsOnConference() == true){
+					toRet = true;
+				}
+			}
+			return toRet;
+		}
+		
+		public function isConferenceActiveWithoutHost():Boolean{
+			var toRet:Boolean = false;
+			var avatars:Array = getVisiblePlayers();
+			for(var i:int = 0; i < avatars.length; i++){
+				var user:User = (avatars[i] as RealmUser).getUser();
+				if(user.getIsOnConference() && user != getHostUser()){
+					toRet = true;
+				}
+			}
+			return toRet;
+		}
+		
+		public function isConferenceActiveVisiblePlayers():Boolean{
+			var toRet:Boolean = false;
+			var avatars:Array = getVisiblePlayers();
+			for(var i:int = 0; i < avatars.length; i++){
+				var user:User = (avatars[i] as RealmUser).getUser();
+				if(user.getIsOnConference()){
+					toRet = true;
+				}
+			}
+			return toRet;
+		}
+		
+		private function onBreakout(e:Event):void{
+			var event:HalcyonEvent = e as HalcyonEvent;
+			var brd:BreakoutConferenceBrd = event.getExtra() as BreakoutConferenceBrd;
+			var userArray:Array= brd.getUserIds();
+			var players:Array = this.players.getValues();
+			for(var i:int = 0; i<players.length; i++){
+				var user:User = players[i].getUser();
+				user.setBreakout(false);
+				for(var j:int = 0; j < userArray.length; j++){
+					if(user.getId() == userArray[j]){
+						user.setBreakout(true);
+					}
+				}
+			}
+		}
+		
+		private function onAvatarEntered(e:Event):void{
+			var event:HalcyonEvent = e as HalcyonEvent;
+			var entered:AvatarEnteredBrd = event.getExtra() as AvatarEnteredBrd;
+
+			var newParticipant:RealmUser = new Avatar(entered.getAvatarRef());
+			updateNewUser(newParticipant);
+			log.debug("!!!On avatar entered - " + entered);
+			addPlayer(newParticipant);
+			addAvatarApps(newParticipant);
+			if(myUser.getShowAvatarUpdates() == true){
+				var message:HalcyonEvent = new HalcyonEvent("SystemChatMessage");
+				var extra2:Object = new Object();
+				extra2.message =newParticipant.getUser().getFirstName() + " has entered the room";
+				extra2.color = (newParticipant as Avatar).getColor();
+				extra2.uid = (newParticipant as RealmUser).getUser().getId();
+				extra2.user = (newParticipant as RealmUser).getUser();
+				message.setExtra(extra2);
+				_eventManager.dispatchEvent(message);
+			}
+		}
+		
+		private function onAvatarExited(e:Event):void{
+			var event:HalcyonEvent = e as HalcyonEvent;
+			var exited:AvatarExitedBrd = event.getExtra() as AvatarExitedBrd;
+			var exitedParticipant:RealmUser = players.get(exited.getUserId()) as RealmUser;
+			players.remove(exited.getUserId());
+			if(exitedParticipant == null) return;
+			
+			if(this.hostUser.getId() == exitedParticipant.getUser().getId() && ContextManager.getInstance().isIMeet()){
+				log.debug("Stop Share");
+				_eventManager.dispatchEvent(new HalcyonEvent(ShowEvents.STOP_SHARE));
+			}
+			
+			if(this.myUser.getShowAvatarUpdates() == true){
+				var message:HalcyonEvent = new HalcyonEvent("SystemChatMessage");
+				var extra2:Object = new Object();
+				extra2.message =exitedParticipant.getUser().getFirstName() + " has exited the room";
+				extra2.uid = (exitedParticipant as RealmUser).getUser().getId();
+				extra2.user = exitedParticipant.getUser();
+				message.setExtra(extra2);
+				_eventManager.dispatchEvent(message);
+			}
+			
+			// OL: WebcamManager.getInstance().removeUser(exitedParticipant.getUser().getId());
+			WebcamSessionManager.instance.userLeft(exitedParticipant.getUser().getId());
+			AppManager.getInstance().removeUserApps(exitedParticipant.getUser().getId());
+			var newEvent:HalcyonEvent;
+			if(exitedParticipant.getIsSpectator()){
+				newEvent = new HalcyonEvent(SPECTATOR_EXITED);
+			} else {
+				newEvent = new HalcyonEvent(PARTICIPANT_EXITED);
+			}
+			var extra:Object = new Object();
+			extra.participant = exitedParticipant;
+			newEvent.setExtra(extra);
+			this.dispatchEvent(newEvent);
+			log.debug("Dispatching event: " + newEvent.type);
+		}
+		
+		
+		private function onSpectatorExited(e:HalcyonEvent):void{
+			
+		}
+		
+		private function updateNewUser(newParticipant:RealmUser):void {
+			var brd:UpdateUserBrd = this.missingUserUpdates.remove(newParticipant.getUser().getId()) as UpdateUserBrd;
+			log.debug("Got a brd of: " + brd + " from the missing updates list");
+			if(brd != null){
+				newParticipant.getUser().update(brd.getUserRef());
+				log.debug("User weather is: "+brd.getUserRef().getWeatherXml());
+				var id:Number = newParticipant.getUser().getId();
+				
+				if (this.myUserId == id) {
+					log.debug("updateNewUser: updating myUser");
+					myUser.update(brd.getUserRef())
+				}
+				brd.getUserRef().setWeatherXml(null);
+			}
+		}
+		
+		private function onAvatarAction(e:Event):void{
+			log.debug("GOt color changge thing");
+			var event:HalcyonEvent = e as HalcyonEvent;
+			var brd:AvatarActionBrd = event.getExtra() as AvatarActionBrd;
+			var avatar:Avatar = this.getPlayerById(brd.getUserId()) as Avatar;
+			if(avatar!= null){
+				avatar.setColor(brd.getColor());
+			}
+		}
+		
+		private function onUpdateUser(e:Event):void{
+			var event:HalcyonEvent = e as HalcyonEvent;
+			var brd:UpdateUserBrd = event.getExtra() as UpdateUserBrd;
+			
+			log.debug("onUpdateUser brd=" + brd.getId() + "|" + brd.getUserRef().getImageIdx());
+			var id:Number = brd.getUserRef().getId();
+			if((players.get(id) as Avatar) == null){
+				log.debug("FIling user update in missing user: " + brd.getUserRef().getName() + " updates for weather");
+				this.missingUserUpdates.put(id,brd);
+				return;
+			}
+			var user:User = (players.get(id) as Avatar).getUser();
+			if (user.getId() != myUserId) user.update(brd.getUserRef());
+
+			if (this.myUserId == id) {
+				log.debug("onUpdateUser: updating myUser");
+				this.myUser.update(brd.getUserRef());
+				
+				var queryData:Object = LoginProcess.getInstance().getQueryData();
+				if(queryData.action == "c2c"){
+					if(!hasActionNotified){
+						var notifyEvt:NotificationEvent = new NotificationEvent(NotificationEvent.SEND_NOTIFICATION, "", 
+							Babelfish.getInstance().getText("alertText", "actionC2C", "The dialout would happen as soon as you enter the conference.") , -1);
+						_eventManager.dispatchEvent(notifyEvt);
+						hasActionNotified = true
+					}
+					if(myUser.getIsOnConference()) {
+						AudioConferenceManager.getInstance().joinConf(queryData.number, queryData.extension, queryData.country_code, queryData.first_name, queryData.last_name, false, false);
+						queryData.action = null;
+					}
+				}
+			}
+			//Main.getInstance().getViewManager().updateUser(user);
+			var updateEvent:UpdateUserEvent = new UpdateUserEvent(user);
+			updateEvent.brd = brd;
+			updateEvent.updateImage = brd.updateImage;
+			//var updateEvent:HalcyonEvent = new HalcyonEvent(UPDATE_USER,false,false,user);
+			_eventManager.dispatchEvent(updateEvent);
+			AppManager.getInstance().updateUser(user);
+			
+			brd.getUserRef().setWeatherXml(null);
+		}
+		
+		private function onImageUploaded(e:Event):void{
+			log.debug("Updating a user image!");
+			var event:HalcyonEvent = e as HalcyonEvent;
+			var brd:ImageUploadedBrd = event.getExtra() as ImageUploadedBrd;
+			var user:User = (players.get(brd.getUserId()) as RealmUser).getUser();
+			//Main.getInstance().getViewManager().updateUserImage(user);
+			var updateImageEvent:HalcyonEvent = new HalcyonEvent(UPDATE_USER_IMAGE,false,false,user);
+			dispatchEvent(updateImageEvent);
+		}
+		
+		private function onRoleChange(e:Event):void{
+			log.debug("Changing User Role");
+			var event:HalcyonEvent = e as HalcyonEvent;
+			var brd:RoleChangeBrd = event.getExtra() as RoleChangeBrd;
+			var avatar:RealmUser = getPlayerById(brd.getUserId());
+			var addToRoom:Boolean = false;
+			var removeFromRoom:Boolean = false;
+			log.debug("is avatar spectator: " + avatar.getIsSpectator());
+			log.debug("is role coming in participant: " + ((brd.getRoles() & Role.ROLE_SPECTATOR) == 0));
+			if(avatar.getIsSpectator() && ((brd.getRoles() & Role.ROLE_SPECTATOR) == 0))
+				addToRoom = true;
+			else if(avatar.getIsSpectator() == false && ((brd.getRoles() & Role.ROLE_SPECTATOR) > 0))
+				removeFromRoom = true;
+			if(avatar == null){
+				//This shouldn't happen, most likely someone doesnt have a record of a user in the room somehow
+				throw new Error("Got a role change for a user who wasn't actually an avatar");
+				return;
+			}
+			avatar.setRoles(brd.getRoles())
+			log.debug("Roles should now be:______ " + this.getPlayerById(brd.getUserId()).getRoles());
+			var event2:HalcyonEvent = new HalcyonEvent(ROLE_CHANGE,false,false,avatar.getUser().getId());
+			_eventManager.dispatchEvent(event2);
+			_eventManager.dispatchEvent(new RoleChangeEvent(brd));
+			if(addToRoom){
+				var newEvent:HalcyonEvent = new HalcyonEvent(PARTICIPANT_ENTERED);
+				var extra:Object = new Object();
+				extra.participant = avatar;
+				newEvent.setExtra(extra);
+			
+				this.dispatchEvent(newEvent);
+				log.debug("Dispatching participant entered");
+			}
+			
+			if(removeFromRoom){
+				var newEvent2:HalcyonEvent = new HalcyonEvent(PARTICIPANT_EXITED);
+				var extra2:Object = new Object();
+				extra2.participant = avatar;
+				newEvent2.setExtra(extra2);
+				
+				this.dispatchEvent(newEvent2);
+				log.debug("Dispatching participant exited");
+			}
+		}
+		
+		private function onAvatarState(e:Event):void {
+			var event:HalcyonEvent = e as HalcyonEvent;
+			var brd:AvatarStateBrd = event.getExtra() as AvatarStateBrd;
+			var user:User = (players.get(brd.getUserId()) as RealmUser).getUser();
+			user.setState(brd.getStatus());
+			
+			log.debug("onAvatarState state=" + brd.getStatus());
+
+			var avatarStateEvent:AvatarStateEvent = new AvatarStateEvent(AvatarStateEvent.NEW_STATE,false,false,brd.getStatus());
+			avatarStateEvent.setUserId(user.getId());
+			_eventManager.dispatchEvent(avatarStateEvent);
+		}
+		
+		private function onActiveTalkerBrd(e:HalcyonEvent):void{
+			var brd:ActiveTalkerBrd = e.getExtra() as ActiveTalkerBrd;
+			var event:ActiveTalkerEvent = new ActiveTalkerEvent(brd.getUserIds());
+			_eventManager.dispatchEvent(event);
+		}
+		
+		/**
+		 * Function to determine if all the users in the room who can be muted are muted.  This ignores the state of the host user as the mute
+		 * all button cannot do aynthing to the host user
+		 * @return true if all the guests in the room are muted
+		 */
+		public function getAllMuted():Boolean{
+			var users:Array = getVisiblePlayers();
+			var mutedCount:int = 0;
+			var onConferenceCount:int = 0;
+			for(var i:int = 0; i < users.length; i++){
+				var user:User = (users[i] as RealmUser).getUser();
+				if(user.getIsOnConference() && (user.getId() != this.hostUser.getId())){
+					onConferenceCount++;
+					if(user.getIsMuted()){
+						log.debug("Found an unmuted guest, returning false");
+						mutedCount++;
+					}
+				}
+			}
+			if(mutedCount == onConferenceCount && onConferenceCount > 0){
+				return true;
+			}
+			return false;
+		}
+		
+		/**
+		 * Returns true if the host user is currently in the room
+		 * @return true if the host user is currently in the room
+		 */
+		public function getIsHostInRoom():Boolean{
+			return this.players.get(this.hostUser.getId()) != null;
+		}
+		
+		/**
+		 * This returns the highest number of users in the room at any time
+		 * @return The maximum number of users that were in the room
+		 */
+		public function getMaxNumberofUsers():Number{
+			return this.maxNumUsers;
+		}
+		
+		private function onSetAvatarState(e:AvatarStateEvent):void{
+			var request:AvatarStateReq = new AvatarStateReq();
+			request.setStatus(e.getExtra() as String);
+			request.setRealmId(RealmManager.getInstance().getCurrentRealmId());
+			Session.getInstance().sendMessage(request);
+		}
+		
+		/**
+		 * Returns the Number of spectators in the room
+		 * @return The number of users of type spectator in the room
+		 */
+		public function getSpectatorCount():int{
+			var toRet:int = 0;
+			var playerArray:Array = this.players.getValues();
+			for(var i:int = 0; i < playerArray.length; i++){
+				var avatar:RealmUser = playerArray[i] as RealmUser;
+				if(avatar.getIsSpectator() && avatar.getIsProducer() == false){
+					toRet++;
+				}
+			}
+			return toRet;
+		}
+		
+		/**
+		 * Returns the current user marked as 'presenter'
+		 * @return the RealmUser object of the current presenter
+		 */
+		public function getCurrentPresenter():RealmUser{
+			var playerArray:Array = this.players.getValues();
+			for(var i:int = 0; i < playerArray.length; i++){
+				var avatar:RealmUser = playerArray[i] as RealmUser;
+				if(avatar.getIsPresenter()){
+					return avatar;
+				}
+			}
+			return null;
+		}
+	}
+}

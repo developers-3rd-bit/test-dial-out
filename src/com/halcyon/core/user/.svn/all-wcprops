@@ -1,0 +1,47 @@
+K 25
+svn:wc:ra_dav:version-url
+V 69
+/imeet_shared/!svn/ver/1885/trunk/flex/core/src/com/halcyon/core/user
+END
+Avatar.as
+K 25
+svn:wc:ra_dav:version-url
+V 78
+/imeet_shared/!svn/ver/112/trunk/flex/core/src/com/halcyon/core/user/Avatar.as
+END
+User.as
+K 25
+svn:wc:ra_dav:version-url
+V 77
+/imeet_shared/!svn/ver/1885/trunk/flex/core/src/com/halcyon/core/user/User.as
+END
+UserPrefs.as
+K 25
+svn:wc:ra_dav:version-url
+V 82
+/imeet_shared/!svn/ver/1665/trunk/flex/core/src/com/halcyon/core/user/UserPrefs.as
+END
+RealmUser.as
+K 25
+svn:wc:ra_dav:version-url
+V 82
+/imeet_shared/!svn/ver/1609/trunk/flex/core/src/com/halcyon/core/user/RealmUser.as
+END
+Role.as
+K 25
+svn:wc:ra_dav:version-url
+V 76
+/imeet_shared/!svn/ver/319/trunk/flex/core/src/com/halcyon/core/user/Role.as
+END
+AvatarManager.as
+K 25
+svn:wc:ra_dav:version-url
+V 86
+/imeet_shared/!svn/ver/1850/trunk/flex/core/src/com/halcyon/core/user/AvatarManager.as
+END
+RoleChangeEvent.as
+K 25
+svn:wc:ra_dav:version-url
+V 88
+/imeet_shared/!svn/ver/1609/trunk/flex/core/src/com/halcyon/core/user/RoleChangeEvent.as
+END

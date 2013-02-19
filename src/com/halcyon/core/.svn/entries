@@ -1,0 +1,88 @@
+10
+
+dir
+1887
+https://svn.meetsee.net/imeet_shared/trunk/flex/core/src/com/halcyon/core
+https://svn.meetsee.net/imeet_shared
+
+
+
+2012-12-03T21:11:53.354710Z
+1886
+ihawke
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+8608c89f-1a36-4482-a554-830582bbefd2
+
+chat
+dir
+
+show
+dir
+
+audioConferencing
+dir
+
+mail
+dir
+
+appsFileShare
+dir
+
+communications
+dir
+
+webcam
+dir
+
+live
+dir
+
+realm
+dir
+
+fileshare
+dir
+
+tests
+dir
+
+screenshare
+dir
+
+application
+dir
+
+visual
+dir
+
+controls
+dir
+
+events
+dir
+
+alert
+dir
+
+presentation
+dir
+
+util
+dir
+
+user
+dir
+
